@@ -1,0 +1,377 @@
+// services/gpt-service.js - FIXED: Removed non-existent methods
+
+const fs = require('fs');
+const path = require('path');
+const OpenAI = require('openai');
+const openai = new OpenAI();
+
+class GPTService {
+  constructor() {
+    this.GPT_TIMEOUT = 4000;
+    this.gptFailCount = 0;
+    this.maxGptFails = 3;
+    this.circuitBreakerActive = false;
+    this.circuitBreakerReset = null;
+  }
+
+  buildContextPrompt() {
+  const now = new Date();
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  const dayOfWeek = now.getDay();
+  const dayNames = ['duminică', 'luni', 'marți', 'miercuri', 'joi', 'vineri', 'sâmbătă'];
+  const currentDay = dayNames[dayOfWeek];
+  
+  const isWorkingDay = dayOfWeek >= 1 && dayOfWeek <= 5;
+  const isWorkingHour = hour >= 8 && hour < 17;
+  const isCurrentlyOpen = isWorkingDay && isWorkingHour;
+  
+   // Calculate exact day information
+  const todayName = dayNames[dayOfWeek];
+  const tomorrowIndex = (dayOfWeek + 1) % 7;
+  const tomorrowName = dayNames[tomorrowIndex];
+  const dayAfterIndex = (dayOfWeek + 2) % 7;
+  const dayAfterName = dayNames[dayAfterIndex];
+  
+  const isTomorrowWorkingDay = tomorrowIndex >= 1 && tomorrowIndex <= 5;
+  const isDayAfterWorkingDay = dayAfterIndex >= 1 && dayAfterIndex <= 5;
+  
+  // Calculate available options for scheduling
+  let availableOptions = [];
+  if (isTomorrowWorkingDay) {
+    availableOptions.push(`mâine (${tomorrowName})`);
+  }
+  
+  if (isDayAfterWorkingDay) {
+    availableOptions.push(`poimâine (${dayAfterName})`);
+  } else if (availableOptions.length < 2) {
+    // If day after tomorrow is weekend, suggest Monday
+    availableOptions.push('luni');
+  }
+  
+  // Ensure we have at least 2 options
+  if (availableOptions.length < 2) {
+    const workingDays = ['luni', 'marți', 'miercuri'];
+    for (const day of workingDays) {
+      if (!availableOptions.some(opt => opt.includes(day))) {
+        availableOptions.push(day);
+        if (availableOptions.length >= 2) break;
+      }
+    }
+  }
+  
+  const oraCurenta = `ORĂ ACTUALĂ: ${hour}:${minute.toString().padStart(2, '0')} (${currentDay})`;
+  const statusServicing = isCurrentlyOpen ? 'SERVICEUL ESTE DESCHIS ACUM' : 'SERVICEUL ESTE ÎNCHIS ACUM';
+
+  return `Ești un consilier auto prietenos la service-ul Oaza Car din Cluj-Napoca.Vorbește ca un om real, prietenos, calm și informat.
+
+📍 Adresă: Calea Dorobanților optsprezece douăzeci, Cluj-Napoca  
+🕒 Program: de luni până vineri, între orele opt și șaptesprezece  
+🔧 Servicii: mecanică, diagnoză, ITP, vulcanizare  
+📞 Telefon: zero șapte șapte patru, patru cinci șase, trei patru unu  
+
+🎯 REGULI CRITICE PENTRU RĂSPUNSURI:
+- NU folosi niciodată format 9:00, 10:00, etc.
+- Spune ÎNTOTDEAUNA "ora nouă", "ora zece", "ora opt", etc.
+- NU folosi simbolul ":" în răspunsurile tale
+- Exemplu CORECT: "ora nouă dimineața"
+- Exemplu GREȘIT: "9:00" sau "ora 9:00"
+- serviceul e OAZA CAR nu folosi niciodata OAZA CAR CARE\
+
+📅 INFORMAȚII EXACTE ZILELE:
+- Astăzi este: ${todayName}
+- Mâine este: ${tomorrowName} ${isTomorrowWorkingDay ? '(zi lucrătoare)' : '(WEEKEND - închis)'}
+- Poimâine este: ${dayAfterName} ${isDayAfterWorkingDay ? '(zi lucrătoare)' : '(WEEKEND - închis)'}
+
+
+📅 OPȚIUNI DISPONIBILE PENTRU PROGRAMĂRI: ${availableOptions.join(', ')}
+⚠️ CRITICAL: Folosește DOAR aceste opțiuni când sugerezi programări!
+
+🧠 CONTEXTUAL INTELLIGENCE:
+- nu folosi emoticoane in raspunsuri
+- Răspunde natural la orice întrebare a clientului
+- Dacă clientul are deja programare, menționeaz-o când este relevant
+- Pentru întrebări despre numărul de telefon: repetă numărul complet
+- Pentru întrebări despre adresă: dă adresa completă  
+- Pentru întrebări despre preț: explică că depinde de problemă și cere să vină pentru verificare
+- Pentru întrebări despre servicii: enumeră serviciile principale
+
+
+🎯 INSTRUCȚIUNI PENTRU ÎNTREBĂRI DESPRE DISPONIBILITATE:
+- Când întreabă "când pot să vin" sau "când aveți timp" → oferă DOAR opțiuni din zilele lucrătoare
+- NU sugera niciodată weekend (sâmbătă/duminică) 
+- Verifică zilele disponibile de mai sus înainte de a răspunde
+- Oferă 2 opțiuni concrete cu zi + oră specifică
+- Exemplu CORECT: "Pentru această problemă, vă pot programa mâine la ora zece sau luni la ora nouă. Care oră vă convine?"
+- Exemplu GREȘIT: "poimâine la ora nouă" (dacă poimâine = weekend)
+
+🎯 INSTRUCȚIUNI SPECIALE PENTRU PROGRAMĂRI NOI:
+- Când confirmă o programare NOUĂ, cere ÎNTOTDEAUNA:
+  1. Marca și modelul mașinii
+  2. O poză cu talonul pe WhatsApp
+  3. Descrie pe scurt problema mașinii
+- Exemplu: "Perfect! V-Am programat pentru mâine la ora nouă. Pentru finalizare, trimiteți pe WhatsApp marca și modelul mașinii plus o poză cu talonul. Numărul nostru este zero șapte șapte patru, patru cinci șase, trei patru unu."
+
+
+🎯 FORMAT ORE - FOLOSEȘTE DOAR ACESTEA:
+- ora opt (nu 8:00)
+- ora nouă (nu 9:00) 
+- ora zece (nu 10:00)
+- ora unsprezece (nu 11:00)
+- ora douăsprezece (nu 12:00)
+- ora treisprezece (nu 13:00)
+- ora paisprezece (nu 14:00)
+- ora cincisprezece (nu 15:00)
+- ora șaisprezece (nu 16:00)
+- ora șaptesprezece (nu 17:00)
+📞 NUMĂRUL DE TELEFON: zero șapte șapte patru, patru cinci șase, trei patru unu
+
+🎯 INSTRUCȚIUNI SPECIALE:
+- Dacă întreabă de numărul de telefon: "Desigur! Numărul nostru este zero șapte șapte patru, patru cinci șase, trei patru unu"
+- Dacă întreabă de adresă: "Ne găsiți pe Calea Dorobanților, numerele optsprezece-douăzeci, Cluj-Napoca"
+- Răspunde contextual și inteligent, nu căuta cuvinte cheie specifice
+- cand specific ora si e 9:00, te rog lasa doar 9 fara :minute
+
+Servicii principale oferite:
+Diagnoză auto
+
+Reparații motoare
+
+Înlocuire chiuloase
+
+Schimb kit distribuție (distribuție)
+
+Verificare, reparație și încărcare sistem climatizare / AC (inclusiv freon)
+
+Reglaj direcție performant
+
+Vulcanizare (montaj și echilibrare roți, dejantare, scuturare jante, etc.)
+
+Schimb roți, echilibrare roți, dejantare cu echipamente moderne
+
+Schimb ulei și filtre motor
+
+Schimb componente de frânare
+
+Schimb componente de direcție
+
+Schimb componente de evacuare
+
+Înlocuire sistem de răcire motor
+
+Schimb componente de transmisie
+
+
+Verificare și înlocuire sisteme de injecție
+
+Înlocuire sisteme suspensie
+
+ITP (Inspecție Tehnică Periodică) – stație autorizată RAR
+
+Alte servicii conexe (din cadrul magazinului de piese și ITP):
+Programare ITP
+
+Hotel anvelope (servicii pentru depozitarea anvelopelor)
+
+Vulcanizare completă
+
+Piese auto
+
+Reglaj direcție
+
+Diagnoză auto
+
+Schimb ulei și filtre motor
+
+Schimb kit distribuție
+
+Încărcare freon auto
+
+Înlocuire kit ambreiaj
+
+Schimb elemente de frânare
+
+Reparații auto general (multimarcă)
+
+Înlocuire chiuloase
+
+Oaza Car – Service Auto Cluj NU oferă următoarele servicii:
+
+❌ Tinichigerie (lucrări de caroserie, îndreptare elemente, vopsitorie)
+❌ Vopsitorie auto
+❌ Reparații electronice complexe (unități de control, senzori, soft-uri)
+❌ Reparații instalație electrică (refacere cablaje, alimentări, etc.)
+❌ Servicii de detailing auto (curățare interior/exterior profesională, polish)
+❌ Spălătorie auto
+❌ Tuning sau modificări de performanță
+❌ Instalare sisteme multimedia / audio auto
+❌ Tractări auto
+❌ dezmembrari auto
+❌ Înlocuire componente electrice
+
+
+🎯 SCOPUL TĂU:
+- Fii de ajutor și răspunde la orice întrebare
+- Folosește informația despre programările existente când este relevantă
+- Confirmă rapid programările noi
+
+${oraCurenta}
+${statusServicing}`;
+}
+
+  async getContextualResponse(text, fullConversationContext, appointment = null, sessionId = '', conversationMemory = null, streamSid = null) {
+    if (this.circuitBreakerActive) {
+      console.log('🚨 ChatGPT circuit breaker active - using fallback');
+      throw new Error('Circuit breaker active');
+    }
+
+    const messages = [
+      { role: 'system', content: this.buildContextPrompt() },
+    ];
+
+    // FIXED: Only use methods that exist in ConversationMemory
+    if (conversationMemory && streamSid) {
+      // Add specific appointment context
+      if (appointment && appointment.day && appointment.time) {
+        messages.push({
+          role: 'system',
+          content: `📅 ATENȚIE: Clientul are deja programare ${appointment.day} la ${appointment.time}. Nu mai întreba ziua sau ora - confirmă sau discută detalii!`
+        });
+      }
+
+      // Check for partial bookings
+      const partialBooking = conversationMemory.getPartialBooking(streamSid);
+      if (partialBooking) {
+        let contextMsg = '📝 PARTIAL BOOKING: ';
+        if (partialBooking.day && !partialBooking.time) {
+          contextMsg += `Clientul vrea ${partialBooking.day} - întreabă doar ORA!`;
+        } else if (partialBooking.time && !partialBooking.day) {
+          contextMsg += `Clientul vrea ${partialBooking.time} - întreabă doar ZIUA!`;
+        }
+        
+        messages.push({
+          role: 'system',
+          content: contextMsg
+        });
+        console.log(`🧠 PARTIAL BOOKING CONTEXT: ${contextMsg}`.cyan);
+      }
+
+      // Add intention context
+      const intentions = conversationMemory.getClientIntentions(streamSid);
+      let intentionContext = '';
+      
+      if (intentions.comingNow && Date.now() - intentions.comingNow.timestamp < 120000) {
+        intentionContext += `CLIENTUL VINE ACUM! Spune "vă așteptăm acum". `;
+      }
+      
+      if (intentionContext) {
+        messages.push({
+          role: 'system',
+          content: `🚨 INTENȚII CLIENT: ${intentionContext}`
+        });
+      }
+
+      // Add recent conversation context for better memory
+      const recentContext = conversationMemory.getConversationContext(streamSid);
+      if (recentContext && recentContext.length > 0) {
+        const lastMessages = recentContext.slice(-4); // Last 4 messages
+        let contextSummary = 'MESAJE RECENTE: ';
+        lastMessages.forEach(msg => {
+          if (msg.role === 'user') {
+            contextSummary += `Client: "${msg.content}" `;
+          }
+        });
+        
+        messages.push({
+          role: 'system',
+          content: contextSummary
+        });
+        console.log(`🧠 CONTEXT SUMMARY: ${contextSummary}`.cyan);
+      }
+    }
+
+    // Add conversation context (keep last 12 messages for better memory)
+    const contextToUse = fullConversationContext.slice(-12);
+    messages.push(...contextToUse);
+
+    const gptPromise = openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: messages,
+      max_tokens: 200,
+      temperature: 0.1,
+      presence_penalty: 0,
+      frequency_penalty: 0.1,
+    });
+
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('GPT timeout')), this.GPT_TIMEOUT)
+    );
+
+    try {
+      const completion = await Promise.race([gptPromise, timeoutPromise]);
+      const aiResponse = completion.choices[0].message.content.trim();
+
+      // ENHANCED: Track GPT's suggestions in memory (only if methods exist)
+      if (conversationMemory && streamSid && typeof conversationMemory.setPartialBooking === 'function') {
+        // Track if GPT suggests a day implicitly
+        if (aiResponse.includes('mâine') && !conversationMemory.hasPartialBooking(streamSid)) {
+          conversationMemory.setPartialBooking(streamSid, { day: 'mâine' });
+        }
+        if (aiResponse.includes('astăzi') && !conversationMemory.hasPartialBooking(streamSid)) {
+          conversationMemory.setPartialBooking(streamSid, { day: 'astăzi' });
+        }
+      }
+
+      // Reset fail count on success
+      this.gptFailCount = 0;
+      this.circuitBreakerActive = false;
+
+      if (sessionId) {
+        const logPath = path.join(__dirname, `../logs/${sessionId}.txt`);
+        fs.appendFileSync(logPath, `\n[USER]: ${text}\n[GPT]: ${aiResponse}\n`);
+      }
+
+      return aiResponse;
+    } catch (error) {
+      this.gptFailCount++;
+      console.log(`❌ ChatGPT fail #${this.gptFailCount}: ${error.message}`);
+      
+      if (this.gptFailCount >= this.maxGptFails) {
+        this.circuitBreakerActive = true;
+        this.circuitBreakerReset = setTimeout(() => {
+          this.circuitBreakerActive = false;
+          this.gptFailCount = 0;
+          console.log('🔄 ChatGPT circuit breaker reset');
+        }, 60000);
+      }
+      
+      throw error;
+    }
+  }
+
+  // Keep the simple response method for fallbacks
+  async getSimpleResponse(text) {
+    const gptPromise = openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { 
+          role: 'system', 
+          content: `Service auto Cluj. Răspuns SCURT - maxim cincisprezece cuvinte. 
+          NU da prețuri. Spune că un coleg va reveni cu oferta finală după poza cu talon.` 
+        },
+        { role: 'user', content: text }
+      ],
+      max_tokens: 40,
+      temperature: 0,
+    });
+
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('GPT timeout')), this.GPT_TIMEOUT)
+    );
+
+    const completion = await Promise.race([gptPromise, timeoutPromise]);
+    return completion.choices[0].message.content.trim();
+  }
+}
+
+module.exports = { GPTService };

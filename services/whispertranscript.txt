@@ -1,0 +1,74 @@
+const fs = require('fs');
+const path = require('path');
+const { Readable } = require('stream');
+const EventEmitter = require('events');
+const { OpenAI } = require('openai');
+const { exec } = require('child_process');
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+class TranscriptionService extends EventEmitter {
+  constructor() {
+    super();
+    this.buffer = [];
+    this.lastChunkTime = Date.now();
+    this.silenceDuration = 100;
+
+    // doar dacă vrei să proceseze mai devreme când ai ~1s de audio (~16000 bytes @ 16kHz)
+	this.flushInterval = setInterval(() => {
+		if (this.buffer.length > 16000) {
+			this.flushBuffer();
+  }
+}, 300);
+  }
+
+  send(payload) {
+    this.lastChunkTime = Date.now();
+    this.buffer.push(Buffer.from(payload, 'base64'));
+  }
+
+  async flushBuffer() {
+    const audioBuffer = Buffer.concat(this.buffer);
+    this.buffer = [];
+
+    const rawPath = path.join(__dirname, `raw_${Date.now()}.mulaw`);
+    const convertedPath = rawPath.replace('raw_', 'converted_').replace('.mulaw', '.wav');
+
+    try {
+      fs.writeFileSync(rawPath, audioBuffer);
+
+      // 🔄 Convert to 16kHz WAV mono
+      const ffmpegCmd = `ffmpeg -f mulaw -ar 8000 -i "${rawPath}" -ar 16000 -ac 1 "${convertedPath}"`;
+      exec(ffmpegCmd, async (err, stdout, stderr) => {
+        if (err) {
+          console.error('❌ FFmpeg error:', stderr);
+          return;
+        }
+
+        try {
+          const transcription = await openai.audio.transcriptions.create({
+            file: fs.createReadStream(convertedPath),
+            model: 'whisper-1',
+            language: 'ro'
+          });
+
+          console.log('🟡 Whisper transcript:', transcription.text.yellow);
+          this.emit('transcription', transcription.text);
+        } catch (error) {
+          console.error('❌ Whisper transcription error:', error);
+        } finally {
+          fs.unlinkSync(rawPath);
+          fs.unlinkSync(convertedPath);
+        }
+      });
+    } catch (err) {
+      console.error('❌ Error writing or converting audio file:', err);
+    }
+  }
+
+  stop() {
+    clearInterval(this.flushInterval);
+  }
+}
+
+module.exports = { TranscriptionService };
